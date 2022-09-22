@@ -1,0 +1,76 @@
+一、需求分析
+（这个实验本质上就是相当于我们设计一个本地DNS服务器，我们编写的代码都是服务器的代码，除了打开CMD调试这种情况以外，我们可以认为PC就是一台服务器而不是客户端）
+
+1.首先应该具备最基本的“代理”功能，即我们的DNS服务器在接到DNS请求后若本地查询无结果则将该请求转发到互联网DNS服务器上，再将那台DNS的响应结果返回给DNS客户
+
+2.接着我们在代理的基础上实现服务器的“缓存”功能，即它能够将经其转发过的响应结果缓存起来；这一功能的关键在于对DNS消息的解析；
+此处要注意，“缓存”与下面我们要实现的“存储”功能不同，一个是将答案保存在Cache中，不具备权威性；一个是将答案保存在内存中具备权威性
+关于如何利用Cache有限的容量资源，我们使用LRU算法
+
+3.除此之外“添加记录并存储”(这就是服务器功能)，设计的DNS服务器需要具备能够读取我们自定义的记录（IP-域名对照表）的功能，并将记录存入服务器的内存(注意不是Cache)
+
+4.此外还有“不良网站拦截”功能，其本质就是手动添加一些域名映射的IP地址为0.0.0.0，当服务器查询到这些域名对应的IP地址后并不会返回IP而是返回错误信息(设置RCODE 响应码值为3)
+
+5.DNS协议运行在UDP之上，使用53号端口
+咱们设计的DNS服务器(UDP实现)本身就具备并发的功能不需要再使用什么多线程或者多进程实现并发服务器
+因为是并发所以需要具备一个特点就是在上一个客户端查询结果未得到响应时就需要响应下一个客户端的查询请求，
+即不仅要满足对客户端的请求做出区分返回客户端的正确结果，同时要及时响应多个客户端的查询请求
+实现方法是利用DNS报文中的ID字段设计ID转换表以区分不同用户的请求
+
+6.最后由于UDP是无连接，所以需要设置UDP数据报的生存周期，超时后直接丢弃或者覆盖防止占空间
+
+
+二、基本模块
+1.初始化模块
+
+void get_url_ip_map()                       //读取自定义中的 域名-IP 地址映射表，并存储到链表中
+void get_arguments(int argc, char* argv[])  //获取用户输入的命令行参数，设置调试等级、指定外部服务器和配置文件
+void initialize_id_table()                  //初始化ID转换表
+void initialize_socket()                    //初始化套接字（包括创建套接字，设置发送接收模式，设置允许复用，关联 socket 与端口号等等）
+
+2.数据存储模块（“存储”）
+
+2.1域名-IP 地址映射表需要用一种数据结构在计算机内部存储和表示，我们采用链表，下面定义链表结构体
+typedef struct node
+{
+ char url[100];     //域名
+ char ip[21][50];   //ip地址，一个域名对应的IP地址可能有多个
+ int num;           //ip地址的个数
+ int round_num;     //轮询编号（负载均衡相关）
+ struct node* next;
+}Node, * nodeptr;
+
+2.2定义有关链表的操作
+nodeptr create_list();                                  //创建一个空链表
+nodeptr push_front(nodeptr head, char* url, char* ip);  //向链表的头部添加结点（链表头部的结点最晚被替换，这是LRU算法的实现）
+nodeptr delete(nodeptr head, char* url);                //删除链表中域名字段为 url 的结点
+nodeptr pop_back(nodeptr head);                         //删除链表的最后一个结点（cache 满后新增记录之前，删除被替换的记录）
+void print_list(nodeptr head);                          //顺序访问并打印所有链表结点信息
+int size(nodeptr head);                                 //获取链表长度
+char* get_ip(nodeptr head, char* url);                  //顺序查找结点，返回域名字段为 url 的结点的 ip 地址信息，若未找到则返回字符串“NOTFOUND”
+nodeptr move_to_head(nodeptr head,char* url)；          //移动结点至链表的头部（当新查询的记录已经在 cache 中时，需要将其移动至链表头部，使得其最晚被替换,这是LRU算法的核心）
+
+2.3定义有关Cache存储空间的操作
+void insert_record_to_cache(char* url, char *ip)        //向 cache 中添加记录
+void show_cache()                                       //展示 cache 列表
+
+3.信息交互模块（“缓存”“中继”“拦截”）
+该模块的功能是接受并处理来自与客户端和服务器的数据，并进行相应的处理
+
+void process_server_request(char *buf,int length,SOCKADDR_IN server_addr)  //三个参数分别为缓冲区，缓冲区长度，以及外部 DNS 服务器的地址
+//处理来自外部服务器的信息，即分析服务器发来的有用数据，进行 ID 转换，将映射关系存入 cache，并调用函数 sendto()将报文转发给客户端。
+
+void process_client_request(char *buf,int length,SOCKADDR_IN client_addr)  //三个参数分别为缓冲区，缓冲区长度，客户端地址
+//处理来自客户端的信息，分两种情况：若在本地表或Cache表中查询到该域名对应的IP则直接构造响应报文并发送给客户端、均无法查询则进行中继
+//中继的具体做法为：保存客户端 Socket，将客户端的请求报文转发给服务器进行查询，当向外部服务器发送请求时，保存原 id 信息，若保存成功，则返回新 ID 号，若失败返回 0
+
+unsigned short get_new_id(unsigned short ID, SOCKADDR_IN client_addr, BOOL finished)
+//进行信息存储时需要检查是否有合适的位置——是否有超时失效或者已经完成的位置，若有则可以使用该位置
+
+void transform_url(char* buf, char* result)//buf 为字符计数法表示的域名，result为转换完成的正常形式的域名
+//将字符计数法表示的的域名转换为正常形式的域名(直到遇到\0符号为止) 参数
+
+void show_packet(char* buf, int len)//buf 为缓冲区，len 为缓冲区长度
+//输出完整的数据包信息
+
+三、DNS服务器基础知识点

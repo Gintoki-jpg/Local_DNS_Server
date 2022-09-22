@@ -1,0 +1,4 @@
+0.0.0.0 www.bilibili.com
+0.0.0.0 www.sohu.com
+233.233.233.233 www.qq.com
+111.111.111.111 www.bupt.edu.cn
